@@ -30,7 +30,7 @@ public class Bounce : MonoBehaviour
 
     private void OnCollisionEnter2D(Collision2D collision)
     {
-        // If Collision == layer mask
+        // If Collision == tag
         if (!collision.gameObject.CompareTag(_validString)) return;
 
         // Check if the colliding object has a Rigidbody2D
