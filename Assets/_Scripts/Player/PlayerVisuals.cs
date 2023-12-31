@@ -27,11 +27,15 @@ namespace Player {
         }
         public void DashEffect(Vector2 direction)
         {
+            if (!_doVisuals) return;
+
 
         }
 
         public void DashEffectContinual()
         {
+            if (!_doVisuals) return;
+
             _dashParticle.Play();
         }
     }

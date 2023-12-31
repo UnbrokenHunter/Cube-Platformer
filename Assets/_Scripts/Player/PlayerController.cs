@@ -16,7 +16,7 @@ namespace Player
 
         [Title("General")]
         [SerializeField] private bool _debugMode = false;
-        
+
         private PlayerVisuals _visuals;
         private Rigidbody2D _rb;
         private Vector3 _spawnPosition;
@@ -121,6 +121,7 @@ namespace Player
 
 
             if (_isDashing) return;
+            if (_isWaveDashing) return;
 
             // If no input, and velocity is low, round it to 0+
             if (Mathf.Abs(_velocity.x) < _minVelocity && _inputX == 0)
@@ -129,7 +130,7 @@ namespace Player
             // Decelerate ------
             // If going too fast, or not pressing anything, slow down
             if (Mathf.Abs(_velocity.x) >= _maxVelocity || _inputX == 0)
-                _velocity.x = Mathf.Lerp(_velocity.x, 0, (_touchingGround ? _groundDeceleration : _airDeceleration) * Time.fixedDeltaTime);
+                _velocity.x = Mathf.Lerp(_velocity.x, 0, (_isGrounded ? _groundDeceleration : _airDeceleration) * Time.fixedDeltaTime);
 
             if (!_canHorizontal) return;
 
@@ -137,12 +138,12 @@ namespace Player
             if (_inputX != 0 && !_grabbingWall)
             {
                 // Implement Apex Modifiers
-                doApex = _velocity.y > -_apexTolerence && _velocity.y < _apexTolerence && !_grabbingWall && !_touchingGround;
+                doApex = _velocity.y > -_apexTolerence && _velocity.y < _apexTolerence && !_grabbingWall && !_isGrounded;
                 var apexMultipler = (doApex ? 1 : _apexMultipler);
                 var maxSpeed = _maxVelocity * apexMultipler;
 
                 // If the movement isnt too fast
-                var nextFrameMovement = _inputX * (_touchingGround ? _groundAcceleration : _airAcceleration) * Time.fixedDeltaTime * apexMultipler * _horizontalControl;
+                var nextFrameMovement = _inputX * (_isGrounded ? _groundAcceleration : _airAcceleration) * Time.fixedDeltaTime * apexMultipler * _horizontalControl;
                 if (Mathf.Abs(_velocity.x + nextFrameMovement) <= maxSpeed)
                 {
                     // Then Accelerate
@@ -184,15 +185,21 @@ namespace Player
 
         private void HandleVertical()
         {
-            if (_touchingGround)
-            {
+            if (_isGrounded)
                 Recover();
-                //_velocity.y = 0f;
-            }
 
             // Jumping
             // -----------------------
+            HandleJump();
 
+            // Falling
+            // -----------------------
+            HandleFalling();
+
+        }
+
+        private void HandleJump()
+        {
             // If you Can jump, and you press the button, Jump
             if ((_jumpsLeft > 0 && _jumpWasPressed && (_touchingGroundBuffered || _numberOfJumps > 1)) && _canJump)
             {
@@ -204,10 +211,12 @@ namespace Player
                 _jumpsLeft--;
             }
 
-            // Falling
-            // -----------------------
+        }
 
+        private void HandleFalling()
+        {
             if (!_canVertical) return;
+            if (_isDashing) return;
 
             // If onw all, lerp to 0 Y Velo
             if (_grabbingWall)
@@ -221,7 +230,7 @@ namespace Player
             }
 
             // If not on Ground
-            else if (!_touchingGround)
+            else if (!_isGrounded)
             {
 
                 // If Falling to fast, slow down to the max fall speed
@@ -250,6 +259,7 @@ namespace Player
                     }
                 }
             }
+
         }
 
         #endregion
@@ -303,87 +313,96 @@ namespace Player
         {
             if (!_canWall) return;
 
-            // Wall Grab
-            // ------------------------------
-            // If touching a wall, and grab is held
-            _grabbingWall = ((_touchingRight || _touchingLeft) && _grabHeld) && _canWallClimb && _wallStaminaValue > 0 && _wallClimbJumpCooldown < _wallClimbJumpTimer;
+            // Check for Wall Grab
+            // Conditions: Player must be touching a wall, holding the grab button, allowed to wall climb,
+            // have enough stamina, and not be in the wall climb jump cooldown.
+            _grabbingWall = ((_touchingRight || _touchingLeft) && _grabHeld) && _canWallClimb &&
+                            _wallStaminaValue > 0 && _wallClimbJumpCooldown < _wallClimbJumpTimer && !_isDashing;
 
             if (_grabbingWall)
             {
+                // Trigger visual effect for wall sliding
                 _visuals.WallSlideEffect(_touchingLeft ? -1 : 1);
 
-                // Remove Stamina
-                _wallStaminaValue -= Time.fixedDeltaTime *
-                    (_inputY != 1 ?
-                    1 : _wallClimbStaminaUsageMultiplier);
+                // Stamina consumption depends on whether the player is moving upwards (consumes more) or not
+                float staminaDrain = _inputY != 1 ? 1 : _wallClimbStaminaUsageMultiplier;
+                _wallStaminaValue -= Time.fixedDeltaTime * staminaDrain;
 
+                // Apply vertical movement based on player input
                 if (_inputY > 0)
                 {
                     _velocity.y = _wallClimbSpeed * Time.fixedDeltaTime;
-
-                    // Nudge Player over the edge if at the top
-                    if (_touchingTopRight)
-                        _velocity.x += _wallTopNudge;
-
-                    else if (_touchingTopLeft)
-                        _velocity.x -= _wallTopNudge;
+                    // Nudge the player over the edge if they are at the top of the wall
+                    _velocity.x += _touchingTopRight ? _wallTopNudge : (_touchingTopLeft ? -_wallTopNudge : 0);
                 }
                 else if (_inputY < 0)
                 {
                     _velocity.y = -_wallGrabSlideSpeed * Time.fixedDeltaTime;
                 }
-
             }
-            //else if ((_touchingLeft && _inputX < 0) || (_touchingRight && _inputX > 0))
-            //{
-            //    _velocity.y = -_wallSlideSpeed * Time.fixedDeltaTime;
-            //    _visuals.WallSlide(_touchingLeft ? -1 : 1);
-            //}
+
+            // Check for wall sliding without grab
+            if (IsFalling() && IsPressingAgainstWall() && !_grabbingWall)
+            {
+                SlowDownFall();
+            }
 
 
-            // Wall Jumping 
-            // ------------------------------
-
+            // Update the wall climb jump timer
             if (_wallClimbJumpCooldown >= _wallClimbJumpTimer)
+            {
                 _wallClimbJumpTimer += Time.fixedDeltaTime;
+            }
 
+            // Early exit if jump input is not pressed
             if (!_jumpWasPressed) return;
 
-            int flip = _touchingRight ? -1 : 1;
+            int wallSide = _touchingRight ? -1 : 1; // Determine which side of the wall the player is on
 
-            // Wall Climb Jump
-            if (_grabbingWall && _inputY > 0 && _wallClimbJumpCooldown < _wallClimbJumpTimer && _inputX != flip)
+            // Wall Climb Jump: Check if player is grabbing the wall, moving upwards, and not in cooldown
+            if (_grabbingWall && _inputY > 0 && _wallClimbJumpCooldown < _wallClimbJumpTimer && _inputX != wallSide)
             {
-                _jumpWasPressed = false; // Reset Jump Buffer
+                ResetJumpBuffer();
                 _wallStaminaValue -= _wallClimbJumpStaminaCost;
-
                 _velocity.y += _wallClimbJumpForce;
                 _wallClimbJumpTimer = 0;
-
                 _visuals.WallSlideEffect(_touchingLeft ? -1 : 1);
             }
-
-            // Wall Jump
-            // If not touching ground, and you press jump, and your touching a wall
-            else if (!_touchingGround && (_touchingLeft || _touchingRight) && _canWallJump)
+            // Regular Wall Jump: Execute if the player is not touching the ground, presses jump, and is touching a wall
+            else if (!_isGrounded && (_touchingLeft || _touchingRight) && _canWallJump)
             {
-                _velocity = Vector2.zero;
-                _jumpWasPressed = false; // Reset Jump Buffer
-                _grabbingWall = false;
-
-                var velocity = new Vector2(Mathf.Sin(flip * _wallJumpAngle), Mathf.Cos(flip * _wallJumpAngle));
-
-                _velocity += velocity * _wallJumpForce;
-
-                if (_inputX != 0)
-                    _horizontalControl = 0;
-
-                if (_inputX == flip)
-                {
-                    _velocity.y += _wallJumpVerticalBonus;
-                }
+                PerformWallJump(wallSide);
             }
         }
+
+        private void PerformWallJump(int wallSide)
+        {
+            _velocity = Vector2.zero;
+            ResetJumpBuffer();
+            _grabbingWall = false;
+
+            // Calculate jump direction based on the wall jump angle
+            Vector2 jumpDirection = new Vector2(Mathf.Sin(wallSide * _wallJumpAngle), Mathf.Cos(wallSide * _wallJumpAngle));
+            _velocity += jumpDirection * _wallJumpForce;
+
+            // Disable horizontal control if there is horizontal input during the wall jump
+            if (_inputX != 0)
+                _horizontalControl = 0;
+
+            // Apply additional vertical force if jumping in the direction of the wall
+            if (_inputX == wallSide)
+                _velocity.y += _wallJumpVerticalBonus;
+        }
+
+        private void SlowDownFall()
+        {
+            if (!_isDashing)
+            {
+                _velocity.y = Mathf.Max(_velocity.y, -_wallSlideSpeed);
+                _visuals.WallSlideEffect(_touchingLeft ? -1 : 1);
+            }
+        }
+
 
         #endregion
 
@@ -399,7 +418,11 @@ namespace Player
         private Vector2 _dashDirection;
         private float _originalGravityScale;
         private float _dashBufferTimer = 0;
+        private bool _isWaveDashing = false;
 
+        [Title("Wavedash")]
+        [SerializeField] private float _waveDashSpeed = 40f;
+        [SerializeField] private float waveDashVerticalBoost = 1f; 
 
         [Space]
         [SerializeField, LabelText("Can Dash: "), LabelWidth(130)] private bool _canDash = false;
@@ -424,7 +447,9 @@ namespace Player
 
         private void StartDash()
         {
+
             _isDashing = true;
+            _dashWasPressed = false;
             _dashCount--;
             _originalGravityScale = _rb.gravityScale;
             _rb.gravityScale = 0; // Ignore gravity during dash
@@ -444,6 +469,8 @@ namespace Player
 
             while (Time.time < startTime + _dashDuration && _isDashing)
             {
+                if (!_isDashing) yield return null;
+
                 ContinueDash();
                 yield return null;
             }
@@ -453,15 +480,41 @@ namespace Player
 
         private void ContinueDash()
         {
+            // Allow for Wavedashes
+            if (_jumpWasPressed && _isGrounded)
+            {
+                StopCoroutine(nameof(DashCoroutine));
+
+                WaveDash();
+                return;
+            }
+
             _rb.velocity = _dashSpeed * _dashDirection; // Apply constant dash velocity
+            _visuals.DashEffectContinual();
         }
 
         private void EndDash()
         {
+            if (_isWaveDashing) return;
+
             _isDashing = false;
             _rb.gravityScale = _originalGravityScale; // Reset gravity scale
+
             _rb.velocity = Vector2.zero; // Optionally stop the player's movement after dash
-                                         // Additional logic for dash end if needed
+                                             // Additional logic for dash end if needed
+        }
+
+        private void WaveDash()
+        {
+            // Reset dash state
+            _isDashing = false;
+            _rb.gravityScale = _originalGravityScale; // Reset gravity scale
+
+            _isWaveDashing = true;
+
+            // Apply horizontal and vertical components for the wavedash
+            _rb.velocity = new(_waveDashSpeed * _facingDirection, waveDashVerticalBoost);
+
         }
 
         #endregion
@@ -472,7 +525,7 @@ namespace Player
         [SerializeField] private float _groundRaycastLength = 1.0f;
         [SerializeField] private float _wallRaycastLength = 1.0f;
         [SerializeField] private LayerMask raycastMask;
-        private bool _touchingGround = false;
+        private bool _isGrounded = false;
         private bool _touchingGroundBuffered = false;
         private bool _touchingLeft = false;
         private bool _touchingRight = false;
@@ -481,30 +534,30 @@ namespace Player
 
         private void HandleCollisions()
         {
-            _ground[0] = Physics2D.Raycast(transform.localPosition - (Vector3.left / 3), Vector2.down, _groundRaycastLength, raycastMask);
-            _ground[1] = Physics2D.Raycast(transform.localPosition - (Vector3.left / 5), Vector2.down, _groundRaycastLength, raycastMask);
-            _ground[2] = Physics2D.Raycast(transform.localPosition, Vector2.down, _groundRaycastLength, raycastMask);
-            _ground[3] = Physics2D.Raycast(transform.localPosition - (Vector3.right / 5), Vector2.down, _groundRaycastLength, raycastMask);
-            _ground[4] = Physics2D.Raycast(transform.localPosition - (Vector3.right / 3), Vector2.down, _groundRaycastLength, raycastMask);
+            _ground[0] = Physics2D.Raycast(transform.position - (Vector3.left / 3), Vector2.down, _groundRaycastLength, raycastMask);
+            _ground[1] = Physics2D.Raycast(transform.position - (Vector3.left / 5), Vector2.down, _groundRaycastLength, raycastMask);
+            _ground[2] = Physics2D.Raycast(transform.position, Vector2.down, _groundRaycastLength, raycastMask);
+            _ground[3] = Physics2D.Raycast(transform.position - (Vector3.right / 5), Vector2.down, _groundRaycastLength, raycastMask);
+            _ground[4] = Physics2D.Raycast(transform.position - (Vector3.right / 3), Vector2.down, _groundRaycastLength, raycastMask);
 
             // Is touching ground?
-            _touchingGround = Array.Exists(_ground, value => value.collider != null);
+            _isGrounded = Array.Exists(_ground, value => value.collider != null);
 
-            _left[0] = Physics2D.Raycast(transform.localPosition - (Vector3.up / 2), Vector2.left, _wallRaycastLength, raycastMask);
-            _left[1] = Physics2D.Raycast(transform.localPosition - (Vector3.up / 5), Vector2.left, _wallRaycastLength, raycastMask);
-            _left[2] = Physics2D.Raycast(transform.localPosition, Vector2.left, _wallRaycastLength, raycastMask);
-            _left[3] = Physics2D.Raycast(transform.localPosition - (Vector3.down / 5), Vector2.left, _wallRaycastLength, raycastMask);
-            _left[4] = Physics2D.Raycast(transform.localPosition - (Vector3.down / 3), Vector2.left, _wallRaycastLength, raycastMask);
+            _left[0] = Physics2D.Raycast(transform.position - (Vector3.up / 2), Vector2.left, _wallRaycastLength, raycastMask);
+            _left[1] = Physics2D.Raycast(transform.position - (Vector3.up / 5), Vector2.left, _wallRaycastLength, raycastMask);
+            _left[2] = Physics2D.Raycast(transform.position, Vector2.left, _wallRaycastLength, raycastMask);
+            _left[3] = Physics2D.Raycast(transform.position - (Vector3.down / 5), Vector2.left, _wallRaycastLength, raycastMask);
+            _left[4] = Physics2D.Raycast(transform.position - (Vector3.down / 3), Vector2.left, _wallRaycastLength, raycastMask);
 
             // Is touching Left Wall?
             _touchingLeft = Array.Exists(_left, value => value.collider != null);
             _touchingTopLeft = _touchingLeft && _left[4].collider == null && _left[1].collider == null;
 
-            _right[0] = Physics2D.Raycast(transform.localPosition - (Vector3.up / 2), Vector2.right, _wallRaycastLength, raycastMask);
-            _right[1] = Physics2D.Raycast(transform.localPosition - (Vector3.up / 5), Vector2.right, _wallRaycastLength, raycastMask);
-            _right[2] = Physics2D.Raycast(transform.localPosition, Vector2.right, _wallRaycastLength, raycastMask);
-            _right[3] = Physics2D.Raycast(transform.localPosition - (Vector3.down / 5), Vector2.right, _wallRaycastLength, raycastMask);
-            _right[4] = Physics2D.Raycast(transform.localPosition - (Vector3.down / 3), Vector2.right, _wallRaycastLength, raycastMask);
+            _right[0] = Physics2D.Raycast(transform.position - (Vector3.up / 2), Vector2.right, _wallRaycastLength, raycastMask);
+            _right[1] = Physics2D.Raycast(transform.position - (Vector3.up / 5), Vector2.right, _wallRaycastLength, raycastMask);
+            _right[2] = Physics2D.Raycast(transform.position, Vector2.right, _wallRaycastLength, raycastMask);
+            _right[3] = Physics2D.Raycast(transform.position - (Vector3.down / 5), Vector2.right, _wallRaycastLength, raycastMask);
+            _right[4] = Physics2D.Raycast(transform.position - (Vector3.down / 3), Vector2.right, _wallRaycastLength, raycastMask);
 
             // Is touching Right Wall?
             _touchingRight = Array.Exists(_right, value => value.collider != null);
@@ -512,7 +565,7 @@ namespace Player
 
 
             // Coyote Time
-            if (_touchingGround)
+            if (_isGrounded)
             {
                 _touchingGroundBuffered = true;
                 CancelInvoke("SetGroundDelayed");
@@ -538,6 +591,7 @@ namespace Player
             _jumpsLeft = _numberOfJumps;
             _dashCount = _numberOfDashes;
             _wallStaminaValue = _wallStamina;
+            _isWaveDashing = false;
         }
 
         public void Die()
@@ -548,6 +602,27 @@ namespace Player
             _isDashing = false;
 
             transform.position = _spawnPosition;
+        }
+
+        #endregion
+
+        #region Helpers 
+
+        private bool IsFalling()
+        {
+            return _velocity.y < 0;
+        }
+
+        private bool IsPressingAgainstWall()
+        {
+            bool pressingLeft = _touchingLeft && _inputX < 0;
+            bool pressingRight = _touchingRight && _inputX > 0;
+            return pressingLeft || pressingRight;
+        }
+
+        private void ResetJumpBuffer()
+        {
+            _jumpWasPressed = false; // Reset the jump buffer
         }
 
         #endregion
@@ -596,17 +671,17 @@ namespace Player
             if (_verticalDebug)
             {
                 // Ground
-                Gizmos.color = _touchingGround ? Color.green :
+                Gizmos.color = _isGrounded ? Color.green :
                     _touchingGroundBuffered ? Color.yellow : Color.red;
 
-                Gizmos.DrawRay(transform.localPosition - (Vector3.left / 3), Vector2.down * _groundRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.left / 5), Vector2.down * _groundRaycastLength);
-                Gizmos.DrawRay(transform.localPosition, Vector2.down * _groundRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.right / 5), Vector2.down * _groundRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.right / 3), Vector2.down * _groundRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.left / 3), Vector2.down * _groundRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.left / 5), Vector2.down * _groundRaycastLength);
+                Gizmos.DrawRay(transform.position, Vector2.down * _groundRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.right / 5), Vector2.down * _groundRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.right / 3), Vector2.down * _groundRaycastLength);
 
                 Gizmos.color = doApex ? Color.cyan : Color.red;
-                Gizmos.DrawCube(transform.localPosition + Vector3.up * 1.7f, Vector3.one / 3);
+                Gizmos.DrawCube(transform.position + Vector3.up * 1.7f, Vector3.one / 3);
 
                 Handles.color = Color.white;
                 Handles.Label(transform.position + Vector3.left / 2 + Vector3.down, "Y: " + _velocity.y.ToString("N2"));
@@ -618,20 +693,20 @@ namespace Player
                 // Left Wall
                 Gizmos.color = _touchingLeft ? Color.green : Color.red;
 
-                Gizmos.DrawRay(transform.localPosition - (Vector3.up / 2), Vector2.left * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.up / 5), Vector2.left * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition, Vector2.left * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.down / 5), Vector2.left * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.down / 3), Vector2.left * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.up / 2), Vector2.left * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.up / 5), Vector2.left * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position, Vector2.left * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.down / 5), Vector2.left * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.down / 3), Vector2.left * _wallRaycastLength);
 
                 // Right Wall
                 Gizmos.color = _touchingRight ? Color.green : Color.red;
 
-                Gizmos.DrawRay(transform.localPosition - (Vector3.up / 2), Vector2.right * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.up / 5), Vector2.right * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition, Vector2.left * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.down / 5), Vector2.right * _wallRaycastLength);
-                Gizmos.DrawRay(transform.localPosition - (Vector3.down / 3), Vector2.right * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.up / 2), Vector2.right * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.up / 5), Vector2.right * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position, Vector2.left * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.down / 5), Vector2.right * _wallRaycastLength);
+                Gizmos.DrawRay(transform.position - (Vector3.down / 3), Vector2.right * _wallRaycastLength);
             }
 
             if (_wallJumpDebug)
@@ -640,7 +715,7 @@ namespace Player
                 Gizmos.color = Color.yellow;
                 if (_touchingLeft || _touchingRight)
                     flip = _touchingRight ? -1 : 1;
-                else if (_touchingGround && _inputX != 0)
+                else if (_isGrounded && _inputX != 0)
                     flip = _inputX < 0 ? -1 : 1;
 
                 var lineScaler = 3;
@@ -649,9 +724,9 @@ namespace Player
 
                 velocity = velocity * _wallJumpForce / lineScaler;
 
-                Gizmos.DrawRay(transform.localPosition, Vector3.right * velocity.x);                                // Horizontal
-                Gizmos.DrawRay(transform.localPosition + Vector3.right * velocity.x, Vector3.up * velocity.y);      // Vertical
-                Gizmos.DrawRay(transform.localPosition, (Vector3.right * velocity.x) + (Vector3.up * velocity.y));  // Diagonal
+                Gizmos.DrawRay(transform.position, Vector3.right * velocity.x);                                // Horizontal
+                Gizmos.DrawRay(transform.position + Vector3.right * velocity.x, Vector3.up * velocity.y);      // Vertical
+                Gizmos.DrawRay(transform.position, (Vector3.right * velocity.x) + (Vector3.up * velocity.y));  // Diagonal
 
             }
 
@@ -660,17 +735,17 @@ namespace Player
                 if (_wallStamina == _wallStaminaValue)
                 {
                     Gizmos.color = Color.green;
-                    Gizmos.DrawCube(transform.localPosition + Vector3.up, Vector3.right + Vector3.up / 3);
+                    Gizmos.DrawCube(transform.position + Vector3.up, Vector3.right + Vector3.up / 3);
                 }
                 else if (_wallStaminaValue > 0)
                 {
                     Gizmos.color = Color.yellow;
-                    Gizmos.DrawCube(transform.localPosition + Vector3.up, Vector3.right * (_wallStaminaValue / _wallStamina) + Vector3.up / 3);
+                    Gizmos.DrawCube(transform.position + Vector3.up, Vector3.right * (_wallStaminaValue / _wallStamina) + Vector3.up / 3);
                 }
                 else
                 {
                     Gizmos.color = Color.red;
-                    Gizmos.DrawCube(transform.localPosition + Vector3.up, Vector3.right + Vector3.up / 3);
+                    Gizmos.DrawCube(transform.position + Vector3.up, Vector3.right + Vector3.up / 3);
                 }
             }
 
@@ -678,12 +753,12 @@ namespace Player
             {
                 Gizmos.color = _isDashing ? Color.green : Color.red;
 
-                Gizmos.DrawCube(transform.localPosition + Vector3.up / 1.5f + Vector3.left / 5, 
+                Gizmos.DrawCube(transform.position + Vector3.up / 1.5f + Vector3.left / 5, 
                     Vector3.right / 3 + Vector3.up / 4);
 
                 Gizmos.color = _numberOfDashes > 0 ? Color.green : Color.red;
 
-                Gizmos.DrawCube(transform.localPosition + Vector3.up / 1.5f + Vector3.right / 5, 
+                Gizmos.DrawCube(transform.position + Vector3.up / 1.5f + Vector3.right / 5, 
                     Vector3.right / 3 + Vector3.up / 4);
 
                 var dashRayLengthMultiplier = 0.8f;
@@ -704,7 +779,7 @@ namespace Player
                 else
                     Gizmos.color = Color.red;
 
-                Gizmos.DrawSphere(transform.localPosition, 0.25f);
+                Gizmos.DrawSphere(transform.position, 0.25f);
             }
         }
         #endregion
